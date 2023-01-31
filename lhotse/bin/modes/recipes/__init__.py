@@ -26,6 +26,7 @@ from .earnings22 import *
 from .eval2000 import *
 from .fisher_english import *
 from .fisher_spanish import *
+from .fleurs import *
 from .gale_arabic import *
 from .gale_mandarin import *
 from .gigaspeech import *

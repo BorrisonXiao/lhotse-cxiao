@@ -32,6 +32,7 @@ from .l2_arctic import prepare_l2_arctic
 from .libricss import download_libricss, prepare_libricss
 from .librimix import download_librimix, prepare_librimix
 from .librispeech import download_librispeech, prepare_librispeech
+from .fleurs import prepare_fleurs
 from .libritts import download_libritts, prepare_libritts
 from .ljspeech import download_ljspeech, prepare_ljspeech
 from .magicdata import download_magicdata, prepare_magicdata
