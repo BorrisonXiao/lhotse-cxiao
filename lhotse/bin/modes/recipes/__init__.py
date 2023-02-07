@@ -32,6 +32,7 @@ from .gale_mandarin import *
 from .gigaspeech import *
 from .heroico import *
 from .hifitts import *
+from .hklegco import *
 from .icsi import *
 from .l2_arctic import *
 from .libricss import *
@@ -40,6 +41,7 @@ from .librispeech import *
 from .libritts import *
 from .ljspeech import *
 from .magicdata import *
+from .merlion import *
 from .mgb2 import *
 from .mls import *
 from .mtedx import *

@@ -79,7 +79,6 @@ def prepare_fleurs(
                 if result is None:
                     continue
                 recording, segment = result
-                # breakpoint()
                 if recording.id in added:
                     continue
                 added.add(recording.id)

@@ -27,6 +27,7 @@ from .gale_mandarin import prepare_gale_mandarin
 from .gigaspeech import prepare_gigaspeech
 from .heroico import download_heroico, prepare_heroico
 from .hifitts import download_hifitts, prepare_hifitts
+from .hklegco import prepare_hklegco
 from .icsi import download_icsi, prepare_icsi
 from .l2_arctic import prepare_l2_arctic
 from .libricss import download_libricss, prepare_libricss
@@ -36,6 +37,7 @@ from .fleurs import prepare_fleurs
 from .libritts import download_libritts, prepare_libritts
 from .ljspeech import download_ljspeech, prepare_ljspeech
 from .magicdata import download_magicdata, prepare_magicdata
+from .merlion import prepare_merlion
 from .mgb2 import prepare_mgb2
 from .mls import prepare_mls
 from .mobvoihotwords import download_mobvoihotwords, prepare_mobvoihotwords

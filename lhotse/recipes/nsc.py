@@ -61,14 +61,17 @@ def prepare_nsc(
     corpus_dir = Path(corpus_dir)
     assert corpus_dir.is_dir(), f"No such directory: {corpus_dir}"
 
+    manifests = {}
     if dataset_part == "PART3_SameCloseMic":
-        manifests = prepare_same_close_mic(corpus_dir / "PART3")
+        manifests[dataset_part] = prepare_same_close_mic(corpus_dir / "PART3")
     elif dataset_part == "PART3_SeparateIVR":
-        manifests = prepare_separate_phone_mic(corpus_dir / "PART3")
+        manifests[dataset_part] = prepare_separate_phone_mic(corpus_dir / "PART3")
+    elif dataset_part == "merlion":
+        manifests[dataset_part] = prepare_merlion_nsc(corpus_dir)
     else:
         raise ValueError(f"Unknown dataset part: {dataset_part}")
 
-    validate_recordings_and_supervisions(**manifests)
+    validate_recordings_and_supervisions(**manifests[dataset_part])
 
     if output_dir is not None:
         output_dir = Path(output_dir)
@@ -81,6 +84,65 @@ def prepare_nsc(
         )
 
     return manifests
+
+
+def prepare_merlion_nsc(corpus_dir: Pathlike, sampling_rate: int = 16000):
+    check_dependencies()
+    from textgrids import TextGrid
+    import traceback
+
+    recordings = []
+    supervisions = []
+    for audio_path in tqdm(
+        (corpus_dir).glob("*.wav"),
+        desc="Creating manifests for Merlion NSC data",
+    ):
+        try:
+            recording_id = audio_path.stem
+            recording = Recording.from_file(audio_path, recording_id=recording_id)
+
+            for tg_file in corpus_dir.rglob(f"{recording_id}*.TextGrid"):
+                try:
+                    tg = TextGrid(corpus_dir / tg_file, coding="utf-16")
+                except:
+                    tg = TextGrid(corpus_dir / tg_file, coding="utf-8")
+                tg_suffix = tg_file.stem.split("-")[-1]
+                tgid = f"{recording_id}-{tg_suffix}"
+                # breakpoint()
+                segments = [
+                    s
+                    for s in (
+                        SupervisionSegment(
+                            id=f"{tgid}-{idx}",
+                            recording_id=recording_id,
+                            start=segment.xmin,
+                            # We're trimming the last segment's duration as it exceeds the actual duration of the recording.
+                            # This is safe because if we end up with a zero/negative duration, the validation will catch it.
+                            duration=min(
+                                round(segment.xmax - segment.xmin, ndigits=8),
+                                recording.duration - segment.xmin,
+                            ),
+                            text=segment.text,
+                            language="English",
+                            speaker=tgid,
+                        )
+                        for idx, segment in enumerate(tg[tgid])
+                        if segment.text not in ("<S>", "<Z>")  # skip silences
+                    )
+                    if s.duration > 0  # NSC has some bad segments
+                ]
+
+                supervisions.extend(segments)
+            recordings.append(recording)
+        except Exception as e:
+            # traceback.print_exc()
+            # print(tgid)
+            # breakpoint()
+            print(f"Error when processing {audio_path} - skipping...")
+    return {
+        "recordings": RecordingSet.from_recordings(recordings),
+        "supervisions": SupervisionSet.from_segments(supervisions),
+    }
 
 
 def prepare_same_close_mic(part3_path):

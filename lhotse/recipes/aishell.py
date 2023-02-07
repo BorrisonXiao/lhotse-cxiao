@@ -10,7 +10,7 @@ import shutil
 import tarfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Optional, Union, Sequence
 
 from tqdm.auto import tqdm
 
@@ -18,6 +18,9 @@ from lhotse import validate_recordings_and_supervisions
 from lhotse.audio import Recording, RecordingSet
 from lhotse.supervision import SupervisionSegment, SupervisionSet
 from lhotse.utils import Pathlike, safe_extract, urlretrieve_progress
+
+
+SPLITS = ["train", "dev", "test"]
 
 
 def text_normalize(line: str):
@@ -60,7 +63,8 @@ def download_aishell(
         extracted_dir = corpus_dir / tar_name[:-4]
         completed_detector = extracted_dir / ".completed"
         if completed_detector.is_file():
-            logging.info(f"Skipping download of because {completed_detector} exists.")
+            logging.info(
+                f"Skipping download of because {completed_detector} exists.")
             continue
         if force_download or not tar_path.is_file():
             urlretrieve_progress(
@@ -80,7 +84,10 @@ def download_aishell(
 
 
 def prepare_aishell(
-    corpus_dir: Pathlike, output_dir: Optional[Pathlike] = None
+    corpus_dir: Pathlike,
+    dataset_parts: Union[str, Sequence[str]] = "auto",
+    output_dir: Optional[Pathlike] = None,
+    sample_rate: int = 16000,
 ) -> Dict[str, Dict[str, Union[RecordingSet, SupervisionSet]]]:
     """
     Returns the manifests which consist of the Recordings and Supervisions
@@ -102,7 +109,12 @@ def prepare_aishell(
             content = text_normalize(content)
             transcript_dict[idx_transcript[0]] = content
     manifests = defaultdict(dict)
-    dataset_parts = ["train", "dev", "test"]
+
+    if dataset_parts == "auto":
+        dataset_parts = SPLITS
+    if isinstance(dataset_parts, str):
+        dataset_parts = [dataset_parts]
+
     for part in tqdm(
         dataset_parts,
         desc="Process aishell audio, it takes about 102 seconds.",
@@ -123,7 +135,8 @@ def prepare_aishell(
             if not audio_path.is_file():
                 logging.warning(f"No such file: {audio_path}")
                 continue
-            recording = Recording.from_file(audio_path)
+            recording = Recording.from_file(audio_path, recording_id=idx) if sample_rate == 16000 else Recording.from_file(
+                audio_path, recording_id=idx).resample(sample_rate)
             recordings.append(recording)
             segment = SupervisionSegment(
                 id=idx,
@@ -145,8 +158,10 @@ def prepare_aishell(
             supervision_set.to_file(
                 output_dir / f"aishell_supervisions_{part}.jsonl.gz"
             )
-            recording_set.to_file(output_dir / f"aishell_recordings_{part}.jsonl.gz")
+            recording_set.to_file(
+                output_dir / f"aishell_recordings_{part}.jsonl.gz")
 
-        manifests[part] = {"recordings": recording_set, "supervisions": supervision_set}
+        manifests[part] = {"recordings": recording_set,
+                           "supervisions": supervision_set}
 
     return manifests
