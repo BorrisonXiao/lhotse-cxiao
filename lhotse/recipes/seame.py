@@ -13,9 +13,13 @@ from lhotse.utils import Pathlike
 from lhotse.recipes.utils import manifests_exist, read_manifests_if_cached
 from concurrent.futures.thread import ThreadPoolExecutor
 
+import jieba
+import re
+
 
 # Note that phaseI is not supported since it is a subset of phaseII
 SPLITS = ["conversation-phaseII", "interview-phaseII"]
+LABELS = {"ZH": "Chinese", "EN": "English", "CS": "CS"}
 
 
 def prepare_seame(
@@ -23,6 +27,7 @@ def prepare_seame(
     dataset_parts: Union[str, Sequence[str]] = "auto",
     output_dir: Optional[Pathlike] = None,
     num_jobs: int = 1,
+    lbl_dir: Optional[Pathlike] = None,
 ) -> Dict[str, Dict[str, Union[RecordingSet, SupervisionSet]]]:
     """
     Returns the manifests which consist of the Recordings and Supervisions
@@ -62,18 +67,29 @@ def prepare_seame(
             futures = []
             trans_dir = type_path / "transcript" / phase
             audio_dir = type_path / "audio"
+            _lbl_dir = None
+            if lbl_dir is not None:
+                lbl_dir = Path(lbl_dir)
+                _lbl_dir = lbl_dir / rec_type / "transcript" / phase
             for trans_path in tqdm(
                 trans_dir.rglob("*.txt"), desc="Distributing tasks", leave=False
             ):
                 recording_id = trans_path.stem
                 recording_path = audio_dir / f"{recording_id}.flac"
+                lbl_path = None
+                if _lbl_dir is not None:
+                    lbl_path = _lbl_dir / f"{recording_id}.lbl"
+                    if not lbl_path.is_file():
+                        logging.warning(
+                            f"Label {lbl_path} is missing - using original."
+                        )
                 if not recording_path.is_file():
                     logging.warning(
                         f"Recording {recording_path} is missing - skipping."
                     )
                     continue
                 futures.append(ex.submit(parse_recording,
-                               recording_path, trans_path, phase))
+                               recording_path, trans_path, phase, lbl_path))
 
             for future in tqdm(futures, desc="Processing", leave=False):
                 result = future.result()
@@ -104,8 +120,54 @@ def prepare_seame(
     return manifests
 
 
-def parse_recording(recording_path: Path, trans_path: Path, phase: str) -> Optional[Tuple[Recording, List[SupervisionSegment]]]:
+def tokenize_text(text: str, threshold: int=4) -> str:
+    """
+    Tokenize the code-switched text for Chinese words that are longer than threshold.
+    This is due to SEAME transcriptions' issue that only part of the transcripts are tokenized properly.
+    """
+    puncs = re.compile(r"\~|\-|\!|\.|\?")
+    # Remove punctuation
+    text = puncs.sub("", text)
+    # Remove text enclosed in #
+    text = re.sub(r"\#\S+\#", "", text)
+    text = re.sub(r"\S(\[.+\])\S", r" \1 ", text)
+    tokens = text.strip().split()
+    # For each token, if it's a Chinese word, and the length is greater than threshold, tokenize it using jieba
+    tokenized = " ".join([token if len(token) <= threshold or not token[0].isalpha() else " ".join(jieba.cut(token)) for token in tokens])
+    # Remove the duplicated [ and ]
+    tokenized = re.sub(r"\[\s*\[", r"[", tokenized)
+    tokenized = re.sub(r"\]\s*\]", r"]", tokenized)
+    # Remove spaces within []
+    tokenized = re.sub(r"\[\s+(\S)", r"[\1", tokenized)
+    tokenized = re.sub(r"(\S)\s+\]", r"\1]", tokenized)
+    # Insert space before [ and after ]
+    tokenized = re.sub(r"(\S)\[", r"\1 [", tokenized)
+    tokenized = re.sub(r"\](\S)", r"] \1", tokenized)
+    # Insert space before ( and after )
+    tokenized = re.sub(r"(\S)\(", r"\1 (", tokenized)
+    tokenized = re.sub(r"\)(\S)", r") \1", tokenized)
+    
+    return tokenized.strip()
+
+
+def read_lbl_file(lbl_path: Path) -> List[Dict[str, str]]:
+    """
+    Read the label file and return a list of labels
+    """
+    with open(lbl_path, "r") as f:
+        lines = f.readlines()
+    lbls = []
+    for line in lines:
+        _, start, end, lbl = line.strip().split()
+        lbls.append({"start": float(start), "end": float(end), "lbl": LABELS[lbl]})
+    return lbls
+
+
+def parse_recording(recording_path: Path, trans_path: Path, phase: str, lbl_path: Path) -> Optional[Tuple[Recording, List[SupervisionSegment]]]:
     recording_id = recording_path.stem
+    lbls = None
+    if lbl_path is not None:
+        lbls = read_lbl_file(lbl_path)
     # There are more information about each utterance in the recording_id, however, it's not kept for now
     # Please see the documentation file SEAME.V4.0.doc for more details
     spkid = recording_id[4:6]
@@ -130,17 +192,41 @@ def parse_recording(recording_path: Path, trans_path: Path, phase: str) -> Optio
             logging.warning(
                 f"End time {end_time} for {recording_id} is greater than recording duration {recording.duration} - trimming."
             )
+
+        # Jieba is used to tokenize Chinese words that are longer than certain characters
+        # print(text)
+        text = tokenize_text(text)
+        # print(text)
+        # print()
         
-        segment = SupervisionSegment(
-            id=f"{recording_id}-{idx}",
-            recording_id=recording_id,
-            start=start_time,
-            duration=end_time - start_time,
-            channel=0,
-            language=lang,
-            speaker=spkid,
-            text=text.strip(),
-            gender=gender,
-        )
-        segments.append(segment)
+        if lbls is not None:
+            lang = lbls[idx]["lbl"]
+            # Don't add CS segments
+            if lang == "CS":
+                continue
+            segment = SupervisionSegment(
+                id=f"{recording_id}-{idx}",
+                recording_id=recording_id,
+                start=start_time,
+                duration=end_time - start_time,
+                channel=0,
+                language=lang,
+                speaker=spkid,
+                text=text.strip(),
+                gender=gender,
+            )
+            segments.append(segment)
+        else:
+            segment = SupervisionSegment(
+                id=f"{recording_id}-{idx}",
+                recording_id=recording_id,
+                start=start_time,
+                duration=end_time - start_time,
+                channel=0,
+                language=lang,
+                speaker=spkid,
+                text=text.strip(),
+                gender=gender,
+            )
+            segments.append(segment)
     return recording, segments

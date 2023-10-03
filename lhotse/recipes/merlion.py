@@ -17,6 +17,7 @@ from lhotse.recipes.librispeech import prepare_librispeech
 from lhotse.recipes.aishell import prepare_aishell
 from lhotse.recipes.nsc import prepare_nsc
 from lhotse.recipes.seame import prepare_seame
+import re
 
 SPLITS = [
     "SEAME",
@@ -24,6 +25,7 @@ SPLITS = [
     "NSC",
     "AISHELL",
     "dev",
+    "test",
 ]
 
 
@@ -73,6 +75,7 @@ def prepare_merlion_dev(
             segment = SupervisionSegment(
                 id=f"{recording_id}-{uttid}-{idx:05d}",
                 recording_id=recording_id,
+                text="",  # We don't have the transcripts, but this field is needed to build SpeechRecognitionDataset
                 start=start,
                 duration=length,
                 channel=0,
@@ -149,6 +152,8 @@ def prepare_merlion(
             alignments_dir=alignments_dir,
             num_jobs=num_jobs,
         )
+        for supervision in manifests["LibriSpeech"]["train-clean-100"]["supervisions"]:
+            supervision.text = supervision.text.lower()
 
     if "AISHELL" in dataset_parts:
         logging.info("Preparing AISHELL manifests...")
@@ -168,6 +173,14 @@ def prepare_merlion(
             corpus_dir=nsc_dir,
             dataset_part="merlion",
         )
+        for supervision in manifests["NSC"]["merlion"]["supervisions"]:
+            # Remove the trailing ~ or ? charactersm for each word
+            cleaned_text = " ".join([word.strip("~?-") for word in supervision.text.split()])
+            # Remove words that start and end with #, e.g. #啊# or #嗯#
+            cleaned_text = re.sub(r"#\S+#", "", cleaned_text)
+            # Remove the non-Chinese characters in <mandarin>...</mandarin>
+            cleaned_text = re.sub(r"<mandarin>(.+)\:(.+)</mandarin>", r"\1", cleaned_text)
+            supervision.text = cleaned_text
 
     if "SEAME" in dataset_parts:
         logging.info("Preparing SEAME manifests...")
@@ -177,6 +190,7 @@ def prepare_merlion(
             corpus_dir=seame_dir,
             dataset_parts="auto",
             num_jobs=num_jobs,
+            lbl_dir="/home/sli136/Merlion-CCS/data"
         )
 
     if "dev" in dataset_parts:
@@ -185,6 +199,14 @@ def prepare_merlion(
         dev_dir = corpus_dir / "dev"
         manifests["dev"] = prepare_merlion_dev(
             corpus_dir=dev_dir,
+        )
+
+    if "test" in dataset_parts:
+        logging.info("Preparing test manifests...")
+        # Prepare the dev manifests
+        test_dir = corpus_dir / "test"
+        manifests["test"] = prepare_merlion_test(
+            corpus_dir=test_dir,
         )
 
     if output_dir is not None:
@@ -202,6 +224,7 @@ def prepare_merlion(
                         recordings = subset_manifest["recordings"]
                     else:
                         recordings += subset_manifest["recordings"]
+
             except KeyError as e:
                 print(f"Error in {part}")
                 print(e)
@@ -212,6 +235,90 @@ def prepare_merlion(
             recordings.to_file(
                 output_dir / f"recordings_{part}.jsonl.gz"
             )
+
+    return manifests
+
+
+def prepare_merlion_test(
+    corpus_dir: Pathlike,
+    output_dir: Optional[Pathlike] = None,
+) -> Dict[str, Dict[str, Union[RecordingSet, SupervisionSet]]]:
+    import csv
+
+    corpus_dir = Path(corpus_dir)
+    assert corpus_dir.is_dir(), f"No such directory: {corpus_dir}"
+
+    part = "test"
+    manifests = {}
+
+    if output_dir is not None:
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # Maybe the manifests already exist: we can read them and save a bit of preparation time.
+        manifests = read_manifests_if_cached(
+            dataset_parts=[part], output_dir=output_dir
+        )
+
+    logging.info(f"Processing Merlion test set")
+    if manifests_exist(part=part, output_dir=output_dir):
+        logging.info(
+            f"{part} already prepared - skipping.")
+    recordings = []
+    supervisions = []
+
+    # Create the supervisions first
+    trans_path = corpus_dir / "CONFIDENTIAL" / "timestamp_labels" / "Task-1_Evaluate.csv"
+    audios = set()
+    with open(trans_path) as csv_file:
+        csv_reader = csv.reader(csv_file, delimiter=',')
+        line_count = 0
+        for idx, row in enumerate(csv_reader):
+            if line_count == 0:
+                line_count += 1
+                continue
+            line_count += 1
+            audio_name, uttid, start, end, length, overlap_diff_lang, dev_eval_status = row
+            recording_id = Path(audio_name).stem
+            start, end, length = float(start) / 1000, float(end) / 1000, float(length) / 1000
+            segment = SupervisionSegment(
+                id=f"{recording_id}-{uttid}-{idx:05d}",
+                recording_id=recording_id,
+                text="",  # We don't have the transcripts, but this field is needed to build SpeechRecognitionDataset
+                start=start,
+                duration=length,
+                channel=0,
+                language=""
+            )
+            supervisions.append(segment)
+            audios.add(recording_id)
+
+    # Then, create the recordings
+    audio_dir = corpus_dir / "CONFIDENTIAL" / "audio"
+    for audio_file in tqdm(audio_dir.glob("*.wav")):
+        recording_id = audio_file.stem
+        if recording_id not in audios:
+            continue
+        # We need to resample the audio to 16kHz
+        recording = Recording.from_file(audio_file, recording_id=recording_id).resample(16000)
+        recordings.append(recording)
+
+    recording_set = RecordingSet.from_recordings(recordings)
+    supervision_set = SupervisionSet.from_segments(supervisions)
+
+    validate_recordings_and_supervisions(recording_set, supervision_set)
+
+    if output_dir is not None:
+        supervision_set.to_file(
+            output_dir / f"test_supervisions.jsonl.gz"
+        )
+        recording_set.to_file(
+            output_dir / f"test_recordings.jsonl.gz"
+        )
+
+    manifests[part] = {
+        "recordings": recording_set,
+        "supervisions": supervision_set,
+    }
 
     return manifests
 

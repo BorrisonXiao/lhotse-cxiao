@@ -13,6 +13,9 @@ from lhotse.supervision import AlignmentItem, SupervisionSegment, SupervisionSet
 from lhotse.utils import (
     Pathlike,
 )
+import re
+from tn.chinese.normalizer import Normalizer
+cn_normalizer = Normalizer()
 
 FLEURS = (
     "train",
@@ -70,7 +73,7 @@ def prepare_fleurs(
             for datum in subset:
                 # We will create a separate Recording and SupervisionSegment for those.
                 futures.append(
-                    ex.submit(parse_utterance, datum)
+                    ex.submit(parse_utterance, datum, part)
                 )
             # For some reason FLEURS data has duplicates
             added = set()
@@ -108,7 +111,8 @@ def prepare_fleurs(
 
 
 def parse_utterance(
-    datum: dict
+    datum: dict,
+    part: str,
 ) -> Optional[Tuple[Recording, SupervisionSegment]]:
     # Note: stringifying the id is important in this case, otherwise the RecordingSet behaves like a list and leads to bugs
     recording_id = str(datum['id'])
@@ -116,9 +120,13 @@ def parse_utterance(
     audio_path = Path(datum['path'])
     # Create the Recording first
     if not audio_path.is_file():
-        logging.warning(f"No such file: {audio_path}")
-        return None
+        # logging.warning(f"No such file: {audio_path}")
+        parent = audio_path.parent
+        part = "dev" if part == "validation" else part
+        audio_path = parent / part / audio_path.name
+        assert audio_path.is_file(), f"No such file: {audio_path}"
     recording = Recording.from_file(audio_path, recording_id=recording_id)
+    tokenized_text = tokenize(text.strip())
     # Then, create the corresponding supervisions
     segment = SupervisionSegment(
         id=recording_id,
@@ -127,7 +135,38 @@ def parse_utterance(
         duration=recording.duration,
         channel=0,
         language="Cantonese Chinese",
-        text=text.strip(),
-        gender='M' if datum['gender'] == 0 else 'F'
+        text=tokenized_text,
+        gender='M' if datum['gender'] == 0 else 'F',
+        custom={'raw_text': text.strip()},
     )
     return recording, segment
+
+
+def tokenize(text: str, uttid: Optional[str] = None):
+    """
+    Tokenize the Cantonese/traditional Chinese text.
+    This function depends on the WeTextProcessing package.
+    """
+    chinese_punc = re.compile(r'\!|\;|\~|\！|\？|\。|\＂|\＃|\＄|\％|\＆|\＇|\（|\）|\＊|\＋|\，|\－|\／|\：|\︰|\；|\＜|\＝|\＞|\＠|\［|\＼|\］|\＾|\＿|\｀|\｛|\｜|\｝|\～|\｟|\｠|\｢|\｣|\､|\〃|\《|\》|\》|\「|\」|\『|\』|\【|\】|\〔|\〕|\〖|\〗|\〘|\〙|\〚|\〛|\〜|\〝|\〞|\〟|\〰|\〾|\〿|\–—|\|\‘|\’|\‛|\“|\”|\"|\„|\‟|\…|\‧|\﹏|\、|\,|\.|\:|\?|\'|\"')
+    extra_puncs = re.compile(
+        r'\'|\.|\\|\/|\*|\-|\<|\>|\#|\$|\%|\^|\&|\(|\)|\_|\+|\=|\:|\"|\`|\~')
+    res = text
+    # Replace spaces between English letters with "▁" (same as sentencepiece), note that this should
+    # be executed twice due to python re's implementation
+    res = re.sub(r"([a-zA-Z\d]+)\s+([a-zA-Z\d]+)", r"\1▁\2", res)
+    res = re.sub(r"([a-zA-Z\d]+)\s+([a-zA-Z\d]+)", r"\1▁\2", res)
+    # WeTextProcessing seems to have a bug that automatically merges spaces between English letters
+    res = cn_normalizer.normalize(res)
+    # Remove all spaces
+    res = re.sub(r"\s+", "", res)
+    # Replace the ▁ with a space
+    res = re.sub(r"▁", " ", res)
+    # Remove all the punctuations.
+    res = re.subn(chinese_punc, '', res)[0]
+    res = re.subn(extra_puncs, '', res)[0]
+    # Add space after Chinese chars
+    res = re.sub(r"([^a-zA-Z\d\s])", r"\1 ", res)
+    # Add space between non-Chinese and Chinese chars
+    res = re.sub(r"([a-zA-Z\d])([^a-zA-Z\d\s])", r"\1 \2", res)
+
+    return res.strip() if not uttid else (uttid, res.strip())
